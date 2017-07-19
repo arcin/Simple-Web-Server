@@ -13,37 +13,6 @@ typedef SimpleWeb::Server<SimpleWeb::HTTP> HttpServer;
 typedef SimpleWeb::Client<SimpleWeb::HTTP> HttpClient;
 
 int main() {
-  {
-    // Test SharedMutex
-    SimpleWeb::SharedMutex mutex;
-    int count = 0;
-    {
-      thread t([&] {
-        auto lock = mutex.shared_lock();
-        {
-          auto lock = mutex.shared_lock();
-          ++count;
-        }
-      });
-      this_thread::sleep_for(chrono::milliseconds(100));
-      t.detach();
-      assert(count == 1);
-    }
-    thread t;
-    {
-      auto lock = mutex.unique_lock();
-      t = thread([&] {
-        auto lock = mutex.unique_lock();
-        ++count;
-      });
-      this_thread::sleep_for(chrono::milliseconds(100));
-      assert(count == 1);
-    }
-    t.join();
-    assert(count == 2);
-  }
-
-
   HttpServer server;
   server.config.port = 8080;
 

@@ -2,6 +2,7 @@
 #define SIMPLE_WEB_UTILITY_HPP
 
 #include "status_code.hpp"
+#include <atomic>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -234,130 +235,63 @@ namespace SimpleWeb {
   };
 } // namespace SimpleWeb
 
-#ifdef PTHREAD_RWLOCK_INITIALIZER
+#ifdef __SSE2__
+#include <emmintrin.h>
 namespace SimpleWeb {
-  /// Read-preferring R/W lock.
-  /// Uses pthread_rwlock.
-  class SharedMutex {
-    pthread_rwlock_t rwlock;
-
-  public:
-    class SharedLock {
-      friend class SharedMutex;
-      pthread_rwlock_t &rwlock;
-
-      SharedLock(pthread_rwlock_t &rwlock) : rwlock(rwlock) {
-        pthread_rwlock_rdlock(&rwlock);
-      }
-
-    public:
-      ~SharedLock() {
-        pthread_rwlock_unlock(&rwlock);
-      }
-    };
-
-    class UniqueLock {
-      friend class SharedMutex;
-      pthread_rwlock_t &rwlock;
-
-      UniqueLock(pthread_rwlock_t &rwlock) : rwlock(rwlock) {
-        pthread_rwlock_wrlock(&rwlock);
-      }
-
-    public:
-      ~UniqueLock() {
-        pthread_rwlock_unlock(&rwlock);
-      }
-    };
-
-  public:
-    SharedMutex() {
-
-      pthread_rwlock_init(&rwlock, nullptr);
-    }
-
-    ~SharedMutex() {
-      pthread_rwlock_destroy(&rwlock);
-    }
-
-    std::unique_ptr<SharedLock> shared_lock() {
-      return std::unique_ptr<SharedLock>(new SharedLock(rwlock));
-    }
-
-    std::unique_ptr<UniqueLock> unique_lock() {
-      return std::unique_ptr<UniqueLock>(new UniqueLock(rwlock));
-    }
-  };
+  inline void pause() { _mm_pause(); }
+} // namespace SimpleWeb
+// TODO: need verification that the following checks are correct:
+#elif defined(_MSC_VER) && _MSC_VER >= 1800 && (defined(_M_X64) || defined(_M_IX86))
+#include <intrin.h>
+namespace SimpleWeb {
+  inline void pause() { _mm_pause(); }
 } // namespace SimpleWeb
 #else
-#include <condition_variable>
-#include <mutex>
 namespace SimpleWeb {
-  /// Read-preferring R/W lock.
-  /// Based on https://en.wikipedia.org/wiki/Readers%E2%80%93writer_lock#Using_a_condition_variable_and_a_mutex pseudocode.
-  /// TODO: Someone that uses Windows should implement Windows specific R/W locks here.
-  class SharedMutex {
-    std::mutex m;
-    std::condition_variable c;
-    int r = 0;
-    bool w = false;
+  inline void pause() {}
+} // namespace SimpleWeb
+#endif
+
+namespace SimpleWeb {
+  class CancelHandlers {
+    std::atomic<long> count;
 
   public:
-    class SharedLock {
-      friend class SharedMutex;
-      std::condition_variable &c;
-      int &r;
-      std::unique_lock<std::mutex> lock;
-
-      SharedLock(std::mutex &m, std::condition_variable &c, int &r, bool &w) : c(c), r(r), lock(m) {
-        while(w)
-          c.wait(lock);
-        ++r;
-        lock.unlock();
-      }
+    class Lock {
+      std::atomic<long> &count;
+      Lock &operator=(const Lock &) = delete;
+      Lock(const Lock &) = delete;
 
     public:
-      ~SharedLock() {
-        lock.lock();
-        --r;
-        if(r == 0)
-          c.notify_all();
-        lock.unlock();
+      Lock(std::atomic<long> &count) : count(count) {}
+      ~Lock() {
+        count--;
       }
     };
 
-    class UniqueLock {
-      friend class SharedMutex;
-      std::condition_variable &c;
-      bool &w;
-      std::unique_lock<std::mutex> lock;
+    CancelHandlers() : count(0) {}
 
-      UniqueLock(std::mutex &m, std::condition_variable &c, int &r, bool &w) : c(c), w(w), lock(m) {
-        while(w || r > 0)
-          c.wait(lock);
-        w = true;
-        lock.unlock();
-      }
+    /// Returns nullptr if handlers are cancelled, or a handler lock otherwise
+    std::unique_ptr<Lock> lock() {
+      long expected = count;
+      while(expected >= 0 && !count.compare_exchange_weak(expected, expected + 1))
+        pause();
 
-    public:
-      ~UniqueLock() {
-        lock.lock();
-        w = false;
-        c.notify_all();
-        lock.unlock();
-      }
-    };
-
-  public:
-    std::unique_ptr<SharedLock> shared_lock() {
-      return std::unique_ptr<SharedLock>(new SharedLock(m, c, r, w));
+      if(expected < 0)
+        return nullptr;
+      else
+        return std::unique_ptr<Lock>(new Lock(count));
     }
 
-    std::unique_ptr<UniqueLock> unique_lock() {
-      return std::unique_ptr<UniqueLock>(new UniqueLock(m, c, r, w));
+    //// Cancels handlers
+    void cancel() {
+      long expected = 0;
+      while(!count.compare_exchange_weak(expected, -1)) {
+        expected = 0;
+        pause();
+      }
     }
   };
 } // namespace SimpleWeb
-#endif
 
 #endif // SIMPLE_WEB_UTILITY_HPP
